@@ -38,7 +38,7 @@ import java.io.IOException
 class Mango : ConfigurableSource, HttpSource() {
 
     override fun popularMangaRequest(page: Int): Request =
-        GET("$baseUrl/api/library", headersBuilder().build())
+        GET("$baseUrl/api/library?depth=0", headersBuilder().build())
 
     // Our popular manga are just our library of manga
     override fun popularMangaParse(response: Response): MangasPage {
