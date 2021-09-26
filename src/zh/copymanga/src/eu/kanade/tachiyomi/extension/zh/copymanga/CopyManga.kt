@@ -3,6 +3,8 @@ package eu.kanade.tachiyomi.extension.zh.copymanga
 import android.app.Application
 import android.content.SharedPreferences
 import com.luhuiguo.chinese.ChineseUtils
+import com.squareup.duktape.Duktape
+import eu.kanade.tachiyomi.lib.ratelimit.SpecificHostRateLimitInterceptor
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.model.Filter
@@ -19,6 +21,7 @@ import okhttp3.Request
 import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
@@ -40,9 +43,16 @@ class CopyManga : ConfigurableSource, HttpSource() {
     override val supportsLatest = true
     private val popularLatestPageSize = 50 // default
     private val searchPageSize = 12 // default
+    private val mainlandCdn1Url = "https://1767566263.rsc.cdn77.org"
+    private val mainlandCdn2Url = "https://1025857477.rsc.cdn77.org"
+    private val overseasCdn1Url = "https://mirror2.mangafunc.fun"
+    private val overseasCdn2Url = "https://mirror.mangafunc.fun"
 
     val replaceToMirror2 = Regex("1767566263\\.rsc\\.cdn77\\.org")
     val replaceToMirror = Regex("1025857477\\.rsc\\.cdn77\\.org")
+
+    private val CONNECT_PERMITS = 1
+    private val CONNECT_PERIOD = 2L
 
     private val preferences: SharedPreferences by lazy {
         Injekt.get<Application>().getSharedPreferences("source_$id", 0x0000)
@@ -62,7 +72,42 @@ class CopyManga : ConfigurableSource, HttpSource() {
         init(null, arrayOf(trustManager), SecureRandom())
     }
 
+    private val mainSiteApiRateLimitInterceptor = SpecificHostRateLimitInterceptor(
+        baseUrl.toHttpUrlOrNull()!!,
+        CONNECT_PERMITS,
+        CONNECT_PERIOD
+    )
+
+    private val mainlandCDN1RateLimitInterceptor = SpecificHostRateLimitInterceptor(
+        mainlandCdn1Url.toHttpUrlOrNull()!!,
+        CONNECT_PERMITS,
+        CONNECT_PERIOD
+    )
+
+    private val mainlandCDN2RateLimitInterceptor = SpecificHostRateLimitInterceptor(
+        mainlandCdn2Url.toHttpUrlOrNull()!!,
+        CONNECT_PERMITS,
+        CONNECT_PERIOD
+    )
+
+    private val overseasCDN1RateLimitInterceptor = SpecificHostRateLimitInterceptor(
+        overseasCdn1Url.toHttpUrlOrNull()!!,
+        CONNECT_PERMITS,
+        CONNECT_PERIOD
+    )
+
+    private val overseasCDN2RateLimitInterceptor = SpecificHostRateLimitInterceptor(
+        overseasCdn2Url.toHttpUrlOrNull()!!,
+        CONNECT_PERMITS,
+        CONNECT_PERIOD
+    )
+
     override val client: OkHttpClient = super.client.newBuilder()
+        .addInterceptor(mainSiteApiRateLimitInterceptor)
+        .addInterceptor(mainlandCDN1RateLimitInterceptor)
+        .addInterceptor(mainlandCDN2RateLimitInterceptor)
+        .addInterceptor(overseasCDN1RateLimitInterceptor)
+        .addInterceptor(overseasCDN2RateLimitInterceptor)
         .sslSocketFactory(sslContext.socketFactory, trustManager)
         .build()
 
@@ -73,8 +118,8 @@ class CopyManga : ConfigurableSource, HttpSource() {
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
         // when perform html search, sort by popular
-        // val apiUrlString = "$baseUrl/api/kb/web/search/comics?limit=$searchPageSize&offset=${(page - 1) * searchPageSize}&platform=2&q=$query&q_type="
-        val apiUrlString = "$baseUrl/api/v3/search/comic?limit=$searchPageSize&offset=${(page - 1) * searchPageSize}&platform=2&q=$query&q_type="
+        val apiUrlString = "$baseUrl/api/kb/web/searchs/comics?limit=$searchPageSize&offset=${(page - 1) * searchPageSize}&platform=2&q=$query&q_type="
+//        val apiUrlString = "$baseUrl/api/v3/search/comic?limit=$searchPageSize&offset=${(page - 1) * searchPageSize}&platform=2&q=$query&q_type="
         val htmlUrlString = "$baseUrl/comics?offset=${(page - 1) * popularLatestPageSize}&limit=$popularLatestPageSize"
         val requestUrlString: String
 
@@ -112,7 +157,7 @@ class CopyManga : ConfigurableSource, HttpSource() {
         val manga = SManga.create().apply {
             title = _title
             var picture = document.select("div.comicParticulars-title-left img").first().attr("data-src")
-            if (!preferences.getBoolean(change_cdn_tomainland, false)) {
+            if (preferences.getBoolean(CHANGE_CDN_OVERSEAS, false)) {
                 picture = replaceToMirror2.replace(picture, "mirror2.mangafunc.fun")
                 picture = replaceToMirror.replace(picture, "mirror.mangafunc.fun")
             }
@@ -136,10 +181,11 @@ class CopyManga : ConfigurableSource, HttpSource() {
     override fun chapterListRequest(manga: SManga) = mangaDetailsRequest(manga)
     override fun chapterListParse(response: Response): List<SChapter> {
         val document = response.asJsoup()
-        val disposablePass = document.select("div.disposablePass").first().attr("disposable")
+        val disposablePass = this.evaluateScript(document, "dio")
 
         // Get encrypted chapters data from another endpoint
-        val chapterResponse = client.newCall(GET("${response.request.url}/chapters", headers)).execute()
+        val chapterResponse =
+            client.newCall(GET("${response.request.url}/chapters", headers)).execute()
         val disposableData = JSONObject(chapterResponse.body!!.string()).get("results").toString()
 
         // Decrypt chapter JSON
@@ -157,39 +203,32 @@ class CopyManga : ConfigurableSource, HttpSource() {
 
         val retChapter = ArrayList<SChapter>()
         // Get chapters according to groups
-        chapterGroups.keys().forEach { groupName ->
+        val keys = chapterGroups.keys().asSequence().toList()
+        keys.filter { it -> it == "default" }.forEach { groupName ->
             run {
                 val chapterGroup = chapterGroups.getJSONObject(groupName)
+                fillChapters(chapterGroup, retChapter, comicPathWord)
+            }
+        }
 
-                // group's last update time
-                val groupLastUpdateTime = chapterGroup.optJSONObject("last_chapter")?.optString("datetime_created")
-
-                // chapters in the group to
-                val chapterArray = chapterGroup.optJSONArray("chapters")
-                if (chapterArray != null) {
-                    for (i in 0 until chapterArray.length()) {
-                        val chapter = chapterArray.getJSONObject(i)
-                        retChapter.add(
-                            SChapter.create().apply {
-                                name = chapter.getString("name")
-                                date_upload = stringToUnixTimestamp(groupLastUpdateTime)
-                                url = "/comic/$comicPathWord/chapter/${chapter.getString("id")}"
-                            }
-                        )
-                    }
-                }
+        val otherChapters = ArrayList<SChapter>()
+        keys.filter { it -> it != "default" }.forEach { groupName ->
+            run {
+                val chapterGroup = chapterGroups.getJSONObject(groupName)
+                fillChapters(chapterGroup, otherChapters, comicPathWord)
             }
         }
 
         // place others to top, as other group updates not so often
+        retChapter.addAll(0, otherChapters)
         return retChapter.asReversed()
     }
 
     override fun pageListRequest(chapter: SChapter) = GET(baseUrl + chapter.url, headers)
     override fun pageListParse(response: Response): List<Page> {
         val document = response.asJsoup()
-        val disposableData = document.select("div.disData").first().attr("contentKey")
-        val disposablePass = document.select("div.disPass").first().attr("contentKey")
+        val disposableData = document.select("div.imageData").first().attr("contentKey")
+        val disposablePass = this.evaluateScript(document, "jojo")
 
         val pageJsonString = decryptChapterData(disposableData, disposablePass)
         val pageArray = JSONArray(pageJsonString)
@@ -197,7 +236,7 @@ class CopyManga : ConfigurableSource, HttpSource() {
         val ret = ArrayList<Page>(pageArray.length())
         for (i in 0 until pageArray.length()) {
             var page = pageArray.getJSONObject(i).getString("url")
-            if (!preferences.getBoolean(change_cdn_tomainland, false)) {
+            if (preferences.getBoolean(CHANGE_CDN_OVERSEAS, false)) {
                 page = replaceToMirror2.replace(page, "mirror2.mangafunc.fun")
                 page = replaceToMirror.replace(page, "mirror.mangafunc.fun")
             }
@@ -339,7 +378,7 @@ class CopyManga : ConfigurableSource, HttpSource() {
                 SManga.create().apply {
                     title = _title
                     var picture = obj.getString("cover")
-                    if (!preferences.getBoolean(change_cdn_tomainland, false)) {
+                    if (preferences.getBoolean(CHANGE_CDN_OVERSEAS, false)) {
                         picture = replaceToMirror2.replace(picture, "mirror2.mangafunc.fun")
                         picture = replaceToMirror.replace(picture, "mirror.mangafunc.fun")
                     }
@@ -358,7 +397,7 @@ class CopyManga : ConfigurableSource, HttpSource() {
         val manga = SManga.create()
         element.select("div.exemptComicItem-img > a > img").first().let {
             var picture = it.attr("data-src")
-            if (!preferences.getBoolean(change_cdn_tomainland, false)) {
+            if (preferences.getBoolean(CHANGE_CDN_OVERSEAS, false)) {
                 picture = replaceToMirror2.replace(picture, "mirror2.mangafunc.fun")
                 picture = replaceToMirror.replace(picture, "mirror.mangafunc.fun")
             }
@@ -373,6 +412,27 @@ class CopyManga : ConfigurableSource, HttpSource() {
             manga.title = _title
         }
         return manga
+    }
+
+    private fun fillChapters(chapterGroup: JSONObject, retChapter: ArrayList<SChapter>, comicPathWord: String?) {
+        // group's last update time
+        val groupLastUpdateTime =
+            chapterGroup.optJSONObject("last_chapter")?.optString("datetime_created")
+
+        // chapters in the group to
+        val chapterArray = chapterGroup.optJSONArray("chapters")
+        if (chapterArray != null) {
+            for (i in 0 until chapterArray.length()) {
+                val chapter = chapterArray.getJSONObject(i)
+                retChapter.add(
+                    SChapter.create().apply {
+                        name = chapter.getString("name")
+                        url = "/comic/$comicPathWord/chapter/${chapter.getString("id")}"
+                    }
+                )
+            }
+        }
+        retChapter.lastOrNull()?.date_upload = stringToUnixTimestamp(groupLastUpdateTime)
     }
 
     private fun byteArrayToHexString(byteArray: ByteArray): String {
@@ -403,11 +463,24 @@ class CopyManga : ConfigurableSource, HttpSource() {
         }
     }
 
+    private fun evaluateScript(document: Document, expression: String): String {
+        return Duktape.create().use { duktape ->
+            document.select("script:not([src])").map(Element::data).forEach { script ->
+                try {
+                    duktape.evaluate(script)
+                } catch (ex: Exception) {
+                    // Ignore any exception from evaluating the script
+                }
+            }
+            duktape.evaluate(expression).toString()
+        }
+    }
+
     // thanks to unpacker toolsite, http://matthewfl.com/unPacker.html
-    private fun decryptChapterData(disposableData: String, disposablePass: String = "hotmanga.aes.key"): String {
+    private fun decryptChapterData(disposableData: String, disposablePass: String?): String {
         val prePart = disposableData.substring(0, 16)
         val postPart = disposableData.substring(16, disposableData.length)
-        val disposablePassByteArray = disposablePass.toByteArray(Charsets.UTF_8)
+        val disposablePassByteArray = (disposablePass ?: "hotmanga.aes.key").toByteArray(Charsets.UTF_8)
         val prepartByteArray = prePart.toByteArray(Charsets.UTF_8)
         val dataByteArray = hexStringToByteArray(postPart)
 
@@ -438,13 +511,13 @@ class CopyManga : ConfigurableSource, HttpSource() {
             }
         }
         val cdnPreference = androidx.preference.CheckBoxPreference(screen.context).apply {
-            key = change_cdn_tomainland
-            title = "转换图片CDN为国内"
-            summary = "加载图片使用国内CDN,可以使用代理的情况下请不要打开此选项"
+            key = CHANGE_CDN_OVERSEAS
+            title = "转换图片CDN为境外CDN"
+            summary = "加载图片使用境外CDN，使用代理的情况下推荐打开此选项（境外CDN可能无法查看一些刚刚更新的漫画，需要等待资源更新到CDN）"
 
             setOnPreferenceChangeListener { _, newValue ->
                 try {
-                    val setting = preferences.edit().putBoolean(change_cdn_tomainland, newValue as Boolean).commit()
+                    val setting = preferences.edit().putBoolean(CHANGE_CDN_OVERSEAS, newValue as Boolean).commit()
                     setting
                 } catch (e: Exception) {
                     e.printStackTrace()
@@ -458,6 +531,6 @@ class CopyManga : ConfigurableSource, HttpSource() {
 
     companion object {
         private const val SHOW_Simplified_Chinese_TITLE_PREF = "showSCTitle"
-        private const val change_cdn_tomainland = "changeCDN"
+        private const val CHANGE_CDN_OVERSEAS = "changeCDN"
     }
 }

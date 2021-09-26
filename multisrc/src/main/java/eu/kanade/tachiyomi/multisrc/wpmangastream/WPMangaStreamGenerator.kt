@@ -50,7 +50,9 @@ class WPMangaStreamGenerator : ThemeSourceGenerator {
         SingleLang("Imagine Scan", "https://imaginescan.com.br", "pt-BR", isNsfw = true),
         SingleLang("Vapo Scan", "https://vaposcans.com", "pt-BR", overrideVersionCode = 2),
         SingleLang("Argos Hentai", "https://agshentai.com", "pt-BR", isNsfw = true),
-        SingleLang("Hakai Scan", "http://hakaiscan.xyz", "pt-BR", isNsfw = true)
+        SingleLang("Hakai Scan", "http://hakaiscan.xyz", "pt-BR", isNsfw = true),
+        SingleLang("Batoto Scans", "https://batotoscans.com", "en", isNsfw = true),
+        SingleLang("Random Scans", "https://randomscans.xyz", "en"),
     )
 
     companion object {

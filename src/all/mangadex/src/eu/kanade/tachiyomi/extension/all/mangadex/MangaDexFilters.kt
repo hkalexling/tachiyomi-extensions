@@ -191,12 +191,16 @@ class MangaDexFilters {
         Filter.Select<String>("Excluded tags mode", arrayOf("And", "Or"), 1)
 
     val sortableList = listOf(
-        Pair("Number of follows", ""),
+        Pair("Alphabetic", "title"),
+        Pair("Chapter uploaded at", "latestUploadedChapter"),
+        Pair("Number of follows", "followedCount"),
         Pair("Manga created at", "createdAt"),
         Pair("Manga info updated at", "updatedAt"),
+        Pair("Relevant manga", "relevance"),
+        Pair("Year", "year")
     )
 
-    class SortFilter(sortables: Array<String>) : Filter.Sort("Sort", sortables, Selection(1, false))
+    class SortFilter(sortables: Array<String>) : Filter.Sort("Sort", sortables, Selection(2, false))
 
     internal fun addFiltersToUrl(url: HttpUrl.Builder, filters: FilterList): String {
         url.apply {
@@ -256,14 +260,12 @@ class MangaDexFilters {
                     }
                     is SortFilter -> {
                         if (filter.state != null) {
-                            if (filter.state!!.index != 0) {
-                                val query = sortableList[filter.state!!.index].second
-                                val value = when (filter.state!!.ascending) {
-                                    true -> "asc"
-                                    false -> "desc"
-                                }
-                                addQueryParameter("order[$query]", value)
+                            val query = sortableList[filter.state!!.index].second
+                            val value = when (filter.state!!.ascending) {
+                                true -> "asc"
+                                false -> "desc"
                             }
+                            addQueryParameter("order[$query]", value)
                         }
                     }
                     is TagList -> {
