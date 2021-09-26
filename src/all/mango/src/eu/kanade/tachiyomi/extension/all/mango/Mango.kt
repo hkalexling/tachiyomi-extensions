@@ -132,7 +132,7 @@ class Mango : ConfigurableSource, HttpSource() {
     }
 
     override fun chapterListRequest(manga: SManga): Request =
-        GET(baseUrl + "/api" + manga.url, headers)
+        GET(baseUrl + "/api" + manga.url + "?sort=auto", headers)
 
     // The chapter url will contain how many pages the chapter contains for our page list endpoint
     override fun chapterListParse(response: Response): List<SChapter> {
@@ -142,14 +142,30 @@ class Mango : ConfigurableSource, HttpSource() {
             apiCookies = ""
             throw Exception("Login Likely Failed. Try Refreshing.")
         }
-        return result["entries"].asJsonArray.mapIndexed { index, obj ->
+        return listChapters(result)
+    }
+
+    // Helper function for listing chapters and chapters in nested titles recursively
+    private fun listChapters(titleObj: JsonObject): List<SChapter> {
+        val chapters = mutableListOf<SChapter>()
+        val topChapters = titleObj.getAsJsonArray("entries")?.map { obj ->
             SChapter.create().apply {
-                chapter_number = index + 1F
-                name = "${chapter_number.toInt()} - ${obj["display_name"].asString}"
-                url = "/page/${obj["title_id"].asString}/${obj["id"].asString}/${obj["pages"].asString}/"
+                name = obj["display_name"].asString
+                url =
+                    "/page/${obj["title_id"].asString}/${obj["id"].asString}/${obj["pages"].asString}/"
                 date_upload = 1000L * obj["mtime"].asLong
             }
-        }.sortedByDescending { it.date_upload }
+        }
+        val subChapters = titleObj.getAsJsonArray("titles")?.map { obj ->
+            val name = obj["display_name"].asString
+            listChapters(obj.asJsonObject).map { chp ->
+                chp.name = "$name / ${chp.name}"
+                chp
+            }
+        }?.flatten()
+        if (topChapters !== null) chapters += topChapters
+        if (subChapters !== null) chapters += subChapters
+        return chapters
     }
 
     // Stub
